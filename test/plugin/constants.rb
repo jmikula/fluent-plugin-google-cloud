@@ -140,6 +140,11 @@ module Constants
     detect_subservice false
   )
 
+  PROMETHEUS_ENABLE_CONFIG = %(
+    enable_monitoring true
+    monitoring_type prometheus
+  )
+
   CUSTOM_METADATA_CONFIG = %(
     project_id #{CUSTOM_PROJECT_ID}
     zone #{CUSTOM_ZONE}
@@ -189,6 +194,10 @@ module Constants
       "#{ML_CONSTANTS[:service]}/trial_id" : "#{ML_TRIAL_ID}"
     }
     label_map { "name": "#{ML_CONSTANTS[:service]}/job_id/log_area" }
+  )
+
+  CONFIG_CUSTOM_TRACE_KEY_SPECIFIED = %(
+    trace_key custom_trace_key
   )
 
   # Service configurations for various services.
@@ -420,6 +429,30 @@ module Constants
     'cacheHit' => true,
     'cacheValidatedWithOriginServer' => true
   }
+
+  SOURCE_LOCATION_MESSAGE = {
+    'file' => 'source/file',
+    'function' => 'my_function',
+    'line' => 18
+  }
+
+  OPERATION_MESSAGE = {
+    'id' => 'op_id',
+    'producer' => 'my/app',
+    'last' => true
+  }
+
+  LOG_ENTRY_SUBFIELDS_PARAMS = {
+    # payload key, destination key, payload value
+    DEFAULT_HTTP_REQUEST_KEY => ['httpRequest', HTTP_REQUEST_MESSAGE],
+    DEFAULT_SOURCE_LOCATION_KEY => ['sourceLocation', SOURCE_LOCATION_MESSAGE],
+    DEFAULT_OPERATION_KEY => ['operation', OPERATION_MESSAGE]
+  }
+
+  CUSTOM_LABELS_MESSAGE = {
+    'customKey' => 'value'
+  }
+  CONFLICTING_LABEL_KEY = "#{COMPUTE_CONSTANTS[:service]}/resource_name"
 
   # Tags and their sanitized and encoded version.
   VALID_TAGS = {

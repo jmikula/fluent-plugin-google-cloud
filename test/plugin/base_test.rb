@@ -16,6 +16,7 @@ require 'google/apis'
 require 'helper'
 require 'mocha/test_unit'
 require 'webmock/test_unit'
+require 'prometheus/client'
 
 require_relative 'constants'
 
@@ -99,7 +100,7 @@ module BaseTest
     assert_equal PROJECT_ID, d.instance.project_id
     assert_equal ZONE, d.instance.zone
     assert_equal VM_ID, d.instance.vm_id
-    assert_equal false, d.instance.running_on_managed_vm
+    assert_equal COMPUTE_CONSTANTS[:resource_type], d.instance.resource.type
   end
 
   def test_managed_vm_metadata_loading
@@ -110,9 +111,11 @@ module BaseTest
     assert_equal PROJECT_ID, d.instance.project_id
     assert_equal ZONE, d.instance.zone
     assert_equal VM_ID, d.instance.vm_id
-    assert_equal true, d.instance.running_on_managed_vm
-    assert_equal MANAGED_VM_BACKEND_NAME, d.instance.gae_backend_name
-    assert_equal MANAGED_VM_BACKEND_VERSION, d.instance.gae_backend_version
+    assert_equal APPENGINE_CONSTANTS[:resource_type], d.instance.resource.type
+    assert_equal MANAGED_VM_BACKEND_NAME,
+                 d.instance.resource.labels['module_id']
+    assert_equal MANAGED_VM_BACKEND_VERSION,
+                 d.instance.resource.labels['version_id']
   end
 
   def test_gce_metadata_does_not_load_when_use_metadata_service_is_false
@@ -122,7 +125,7 @@ module BaseTest
     assert_equal CUSTOM_PROJECT_ID, d.instance.project_id
     assert_equal CUSTOM_ZONE, d.instance.zone
     assert_equal CUSTOM_VM_ID, d.instance.vm_id
-    assert_equal false, d.instance.running_on_managed_vm
+    assert_equal COMPUTE_CONSTANTS[:resource_type], d.instance.resource.type
   end
 
   def test_gce_used_when_detect_subservice_is_false
@@ -156,8 +159,6 @@ module BaseTest
       assert_equal parts[1], d.instance.project_id, "Index #{index} failed."
       assert_equal parts[2], d.instance.zone, "Index #{index} failed."
       assert_equal parts[3], d.instance.vm_id, "Index #{index} failed."
-      assert_equal false, d.instance.running_on_managed_vm,
-                   "Index #{index} failed."
     end
   end
 
@@ -515,6 +516,11 @@ module BaseTest
                'timestampSeconds' => ts.tv_sec, 'timestampNanos' => ts.tv_nsec)
         expected_ts.push(ts)
         emit_index += 1
+        d.emit('message' => log_entry(emit_index),
+               'timestampSeconds' => "#{ts.tv_sec}",
+               'timestampNanos' => "#{ts.tv_nsec}")
+        expected_ts.push(ts)
+        emit_index += 1
         d.run
       end
     end
@@ -701,78 +707,17 @@ module BaseTest
     end
   end
 
-  def test_one_container_log_metadata_from_plugin
-    setup_gce_metadata_stubs
-    setup_container_metadata_stubs
-    setup_logging_stubs do
-      d = create_driver(APPLICATION_DEFAULT_CONFIG, CONTAINER_TAG)
-      d.emit(container_log_entry_with_metadata(log_entry(0)))
-      d.run
-    end
-    verify_log_entries(1, CONTAINER_FROM_METADATA_PARAMS) do |entry|
-      assert_equal CONTAINER_SECONDS_EPOCH, entry['timestamp']['seconds'], entry
-      assert_equal CONTAINER_NANOS, entry['timestamp']['nanos'], entry
-      assert_equal CONTAINER_SEVERITY, entry['severity'], entry
-    end
+  # Test container logs when metadata is extracted from the 'kubernetes' field
+  # in the log record.
+  def test_container_logs_metadata_from_record
+    verify_container_logs(method(:container_log_entry_with_metadata),
+                          CONTAINER_FROM_METADATA_PARAMS)
   end
 
-  def test_multiple_container_logs_metadata_from_plugin
-    setup_gce_metadata_stubs
-    setup_container_metadata_stubs
-    [2, 3, 5, 11, 50].each do |n|
-      @logs_sent = []
-      setup_logging_stubs do
-        d = create_driver(APPLICATION_DEFAULT_CONFIG, CONTAINER_TAG)
-        # The test driver doesn't clear its buffer of entries after running, so
-        # do it manually here.
-        d.instance_variable_get('@entries').clear
-        n.times { |i| d.emit(container_log_entry_with_metadata(log_entry(i))) }
-        d.run
-      end
-      verify_log_entries(n, CONTAINER_FROM_METADATA_PARAMS) do |entry|
-        assert_equal CONTAINER_SECONDS_EPOCH, entry['timestamp']['seconds'],
-                     entry
-        assert_equal CONTAINER_NANOS, entry['timestamp']['nanos'], entry
-        assert_equal CONTAINER_SEVERITY, entry['severity'], entry
-      end
-    end
-  end
-
-  def test_multiple_container_logs_metadata_from_tag
-    setup_gce_metadata_stubs
-    setup_container_metadata_stubs
-    [2, 3, 5, 11, 50].each do |n|
-      @logs_sent = []
-      setup_logging_stubs do
-        d = create_driver(APPLICATION_DEFAULT_CONFIG, CONTAINER_TAG)
-        # The test driver doesn't clear its buffer of entries after running, so
-        # do it manually here.
-        d.instance_variable_get('@entries').clear
-        n.times { |i| d.emit(container_log_entry(log_entry(i))) }
-        d.run
-      end
-      verify_log_entries(n, CONTAINER_FROM_TAG_PARAMS) do |entry|
-        assert_equal CONTAINER_SECONDS_EPOCH, entry['timestamp']['seconds'],
-                     entry
-        assert_equal CONTAINER_NANOS, entry['timestamp']['nanos'], entry
-        assert_equal CONTAINER_SEVERITY, entry['severity'], entry
-      end
-    end
-  end
-
-  def test_one_container_log_metadata_from_tag
-    setup_gce_metadata_stubs
-    setup_container_metadata_stubs
-    setup_logging_stubs do
-      d = create_driver(APPLICATION_DEFAULT_CONFIG, CONTAINER_TAG)
-      d.emit(container_log_entry(log_entry(0)))
-      d.run
-    end
-    verify_log_entries(1, CONTAINER_FROM_TAG_PARAMS) do |entry|
-      assert_equal CONTAINER_SECONDS_EPOCH, entry['timestamp']['seconds'], entry
-      assert_equal CONTAINER_NANOS, entry['timestamp']['nanos'], entry
-      assert_equal CONTAINER_SEVERITY, entry['severity'], entry
-    end
+  # Test container logs when metadata is extracted from the tag.
+  def test_container_logs_metadata_from_tag
+    verify_container_logs(method(:container_log_entry),
+                          CONTAINER_FROM_TAG_PARAMS)
   end
 
   def test_one_container_log_from_tag_stderr
@@ -914,47 +859,40 @@ module BaseTest
     verify_log_entries(1, DATAPROC_PARAMS, 'jsonPayload')
   end
 
-  def test_http_request_from_record
-    setup_gce_metadata_stubs
-    setup_logging_stubs do
-      d = create_driver
-      d.emit('httpRequest' => HTTP_REQUEST_MESSAGE)
-      d.run
-    end
-    verify_log_entries(1, COMPUTE_PARAMS, 'httpRequest') do |entry|
-      assert_equal HTTP_REQUEST_MESSAGE, entry['httpRequest'], entry
-      assert_nil get_fields(entry['jsonPayload'])['httpRequest'], entry
-    end
+  def test_log_entry_http_request_field_from_record
+    verify_subfields_from_record(DEFAULT_HTTP_REQUEST_KEY)
   end
 
-  def test_http_request_partial_from_record
-    setup_gce_metadata_stubs
-    setup_logging_stubs do
-      d = create_driver
-      d.emit('httpRequest' => HTTP_REQUEST_MESSAGE.merge(
-        'otherKey' => 'value'))
-      d.run
-    end
-    verify_log_entries(1, COMPUTE_PARAMS, 'httpRequest') do |entry|
-      assert_equal HTTP_REQUEST_MESSAGE, entry['httpRequest'], entry
-      fields = get_fields(entry['jsonPayload'])
-      request = get_fields(get_struct(fields['httpRequest']))
-      assert_equal 'value', get_string(request['otherKey']), entry
-    end
+  def test_log_entry_source_location_field_from_record
+    verify_subfields_from_record(DEFAULT_SOURCE_LOCATION_KEY)
   end
 
-  def test_http_request_when_not_hash
-    setup_gce_metadata_stubs
-    setup_logging_stubs do
-      d = create_driver
-      d.emit('httpRequest' => 'a_string')
-      d.run
-    end
-    verify_log_entries(1, COMPUTE_PARAMS, 'jsonPayload') do |entry|
-      fields = get_fields(entry['jsonPayload'])
-      assert_equal 'a_string', get_string(fields['httpRequest']), entry
-      assert_nil entry['httpRequest'], entry
-    end
+  def test_log_entry_operation_field_from_record
+    verify_subfields_from_record(DEFAULT_OPERATION_KEY)
+  end
+
+  def test_log_entry_http_request_field_partial_from_record
+    verify_subfields_partial_from_record(DEFAULT_HTTP_REQUEST_KEY)
+  end
+
+  def test_log_entry_source_location_field_partial_from_record
+    verify_subfields_partial_from_record(DEFAULT_SOURCE_LOCATION_KEY)
+  end
+
+  def test_log_entry_operation_field_partial_from_record
+    verify_subfields_partial_from_record(DEFAULT_OPERATION_KEY)
+  end
+
+  def test_log_entry_http_request_field_when_not_hash
+    verify_subfields_when_not_hash(DEFAULT_HTTP_REQUEST_KEY)
+  end
+
+  def test_log_entry_source_location_field_when_not_hash
+    verify_subfields_when_not_hash(DEFAULT_SOURCE_LOCATION_KEY)
+  end
+
+  def test_log_entry_operation_field_when_not_hash
+    verify_subfields_when_not_hash(DEFAULT_OPERATION_KEY)
   end
 
   def test_http_request_from_record_with_referer_nil_or_absent
@@ -1010,6 +948,58 @@ module BaseTest
       verify_log_entries(1, COMPUTE_PARAMS, 'httpRequest') do |entry|
         assert_equal HTTP_REQUEST_MESSAGE, entry['httpRequest'], entry
         assert_nil get_fields(entry['jsonPayload'])['httpRequest'], entry
+      end
+    end
+  end
+
+  def test_log_entry_trace_field
+    setup_gce_metadata_stubs
+    message = log_entry(0)
+    trace = 'projects/project-1/traces/1234567890abcdef1234567890abcdef'
+    [
+      {
+        # It leaves trace entry field nil if no trace value sent.
+        driver_config: APPLICATION_DEFAULT_CONFIG,
+        emitted_log: { 'msg' => message },
+        expected_fields: { 'msg' => message },
+        expected_trace_value: nil
+      },
+      {
+        # By default, it sets trace via Google-specific key.
+        driver_config: APPLICATION_DEFAULT_CONFIG,
+        emitted_log: { 'msg' => message, DEFAULT_TRACE_KEY => trace },
+        expected_fields: { 'msg' => message },
+        expected_trace_value: trace
+      },
+      {
+        # It allows setting the trace via a custom configured key.
+        driver_config: CONFIG_CUSTOM_TRACE_KEY_SPECIFIED,
+        emitted_log: { 'msg' => message, 'custom_trace_key' => trace },
+        expected_fields: { 'msg' => message },
+        expected_trace_value: trace
+      },
+      {
+        # It no longer sets trace by the default key if custom key specified.
+        driver_config: CONFIG_CUSTOM_TRACE_KEY_SPECIFIED,
+        emitted_log: { 'msg' => message, DEFAULT_TRACE_KEY => trace },
+        expected_fields: { 'msg' => message, DEFAULT_TRACE_KEY => trace },
+        expected_trace_value: nil
+      }
+    ].each do |input|
+      setup_logging_stubs do
+        @logs_sent = []
+        d = create_driver(input[:driver_config])
+        d.emit(input[:emitted_log])
+        d.run
+      end
+      verify_log_entries(1, COMPUTE_PARAMS, 'jsonPayload') do |entry|
+        assert_equal input[:expected_trace_value], entry['trace'], input
+
+        fields = get_fields(entry['jsonPayload'])
+        assert_equal input[:expected_fields].size, fields.size, input
+        fields.each do |key, value|
+          assert_equal input[:expected_fields][key], get_string(value), input
+        end
       end
     end
   end
@@ -1123,6 +1113,10 @@ module BaseTest
                           DATAPROC_CLUSTER_UUID)
     stub_metadata_request('instance/attributes/dataproc-region',
                           DATAPROC_REGION)
+  end
+
+  def setup_prometheus
+    Prometheus::Client.registry.instance_variable_set('@metrics', {})
   end
 
   def container_tag_with_container_name(container_name)
@@ -1247,6 +1241,74 @@ module BaseTest
     assert i == n, "Number of entries #{i} does not match expected number #{n}"
   end
 
+  def verify_container_logs(log_entry_factory, expected_params)
+    setup_gce_metadata_stubs
+    setup_container_metadata_stubs
+    [1, 2, 3, 5, 11, 50].each do |n|
+      @logs_sent = []
+      setup_logging_stubs do
+        d = create_driver(APPLICATION_DEFAULT_CONFIG, CONTAINER_TAG)
+        n.times { |i| d.emit(log_entry_factory.call(log_entry(i))) }
+        d.run
+      end
+      verify_log_entries(n, expected_params) do |entry|
+        assert_equal CONTAINER_SECONDS_EPOCH, entry['timestamp']['seconds'],
+                     entry
+        assert_equal CONTAINER_NANOS, entry['timestamp']['nanos'], entry
+        assert_equal CONTAINER_SEVERITY, entry['severity'], entry
+      end
+    end
+  end
+
+  def verify_subfields_from_record(payload_key)
+    destination_key, payload_value = LOG_ENTRY_SUBFIELDS_PARAMS[payload_key]
+    @logs_sent = []
+    setup_gce_metadata_stubs
+    setup_logging_stubs do
+      d = create_driver
+      d.emit(payload_key => payload_value)
+      d.run
+    end
+    verify_log_entries(1, COMPUTE_PARAMS, destination_key) do |entry|
+      assert_equal payload_value, entry[destination_key], entry
+      fields = get_fields(entry['jsonPayload'])
+      assert_nil fields[payload_key], entry
+    end
+  end
+
+  def verify_subfields_partial_from_record(payload_key)
+    destination_key, payload_value = LOG_ENTRY_SUBFIELDS_PARAMS[payload_key]
+    @logs_sent = []
+    setup_gce_metadata_stubs
+    setup_logging_stubs do
+      d = create_driver
+      d.emit(payload_key => payload_value.merge('otherKey' => 'value'))
+      d.run
+    end
+    verify_log_entries(1, COMPUTE_PARAMS, destination_key) do |entry|
+      assert_equal payload_value, entry[destination_key], entry
+      fields = get_fields(entry['jsonPayload'])
+      request = get_fields(get_struct(fields[payload_key]))
+      assert_equal 'value', get_string(request['otherKey']), entry
+    end
+  end
+
+  def verify_subfields_when_not_hash(payload_key)
+    destination_key = LOG_ENTRY_SUBFIELDS_PARAMS[payload_key][0]
+    @logs_sent = []
+    setup_gce_metadata_stubs
+    setup_logging_stubs do
+      d = create_driver
+      d.emit(payload_key => 'a_string')
+      d.run
+    end
+    verify_log_entries(1, COMPUTE_PARAMS, 'jsonPayload') do |entry|
+      field = get_fields(entry['jsonPayload'])[payload_key]
+      assert_equal 'a_string', get_string(field), entry
+      assert_nil entry[destination_key], entry
+    end
+  end
+
   # Replace the 'referer' field with nil.
   def http_request_message_with_nil_referer
     HTTP_REQUEST_MESSAGE.merge('referer' => nil)
@@ -1306,6 +1368,12 @@ module BaseTest
   # a plain equal. e.g. assert_in_delta.
   def assert_equal_with_default(_field, _expected_value, _default_value, _entry)
     _undefined
+  end
+
+  def assert_prometheus_metric_value(metric_name, expected_value, labels = {})
+    metric = Prometheus::Client.registry.get(metric_name)
+    assert_not_nil(metric)
+    assert_equal(expected_value, metric.get(labels))
   end
 
   # Get the fields of the payload.
